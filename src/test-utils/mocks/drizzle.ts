@@ -53,7 +53,17 @@ function chainable<T>(rows: T, calls: RecordedCall[]) {
  * `mock.calls` acumula cada llamada de encadenamiento (incluidas `values` y
  * `set`) en orden, para poder comprobar qué datos se intentaron escribir.
  */
-export function createSequentialDbMock(...resultsInOrder: unknown[]) {
+export interface SequentialDbMock {
+  select: (...args: unknown[]) => unknown;
+  insert: (...args: unknown[]) => unknown;
+  update: (...args: unknown[]) => unknown;
+  delete: (...args: unknown[]) => unknown;
+  selectDistinct: (...args: unknown[]) => unknown;
+  transaction: (fn: (tx: SequentialDbMock) => unknown) => Promise<unknown>;
+  calls: RecordedCall[];
+}
+
+export function createSequentialDbMock(...resultsInOrder: unknown[]): SequentialDbMock {
   let cursor = 0;
   const calls: RecordedCall[] = [];
 
@@ -73,13 +83,13 @@ export function createSequentialDbMock(...resultsInOrder: unknown[]) {
       return chainable(next(), calls);
     };
 
-  const mock = {
+  const mock: SequentialDbMock = {
     select: entryPoint("select"),
     insert: entryPoint("insert"),
     update: entryPoint("update"),
     delete: entryPoint("delete"),
     selectDistinct: entryPoint("selectDistinct"),
-    transaction: async (fn: (tx: typeof mock) => unknown) => fn(mock),
+    transaction: async (fn) => fn(mock),
     calls,
   };
 
