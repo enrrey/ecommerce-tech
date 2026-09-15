@@ -1,0 +1,2 @@
+ALTER TABLE "payment_methods" ADD COLUMN "is_default" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "payment_methods_one_default_per_user" ON "payment_methods" USING btree ("user_id") WHERE "payment_methods"."is_default" = true;
