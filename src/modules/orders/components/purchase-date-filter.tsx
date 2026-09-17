@@ -8,8 +8,6 @@ import { Label } from "@/components/ui/label";
 
 import type { MyOrdersQueryInput } from "../schemas/order-history.schema";
 
-type PurchasePreset = "month" | "range";
-
 type PurchaseDateFilterProps = {
   value: MyOrdersQueryInput;
   onChange: (range: MyOrdersQueryInput) => void;
@@ -45,10 +43,20 @@ export function PurchaseDateFilter({
   value,
   onChange,
 }: PurchaseDateFilterProps) {
-  const [preset, setPreset] = useState<PurchasePreset>("month");
+  // Solo estado de presentación: si los campos de rango están desplegados. El
+  // preset activo no se guarda, se deriva de `value`; mantenerlo aparte lo
+  // desincronizaba del filtro real cuando el contenedor arranca sin rango
+  // (el panel de admin abre con `{}` y pintaba "Mes actual" como aplicado).
+  const [showCustomRange, setShowCustomRange] = useState(false);
+
+  const monthRange = currentMonthRange();
+  const monthIsActive =
+    !showCustomRange &&
+    value.from === monthRange.from &&
+    value.to === monthRange.to;
 
   function selectMonth() {
-    setPreset("month");
+    setShowCustomRange(false);
     onChange(currentMonthRange());
   }
 
@@ -60,22 +68,22 @@ export function PurchaseDateFilter({
         aria-label="Periodo del historial"
       >
         <Button
-          variant={preset === "month" ? "default" : "outline"}
-          aria-pressed={preset === "month"}
+          variant={monthIsActive ? "default" : "outline"}
+          aria-pressed={monthIsActive}
           onClick={selectMonth}
         >
           Mes actual
         </Button>
         <Button
-          variant={preset === "range" ? "default" : "outline"}
-          aria-pressed={preset === "range"}
-          onClick={() => setPreset("range")}
+          variant={showCustomRange ? "default" : "outline"}
+          aria-pressed={showCustomRange}
+          onClick={() => setShowCustomRange(true)}
         >
           Rango
         </Button>
       </div>
 
-      {preset === "range" ? (
+      {showCustomRange ? (
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="purchases-from">Desde</Label>

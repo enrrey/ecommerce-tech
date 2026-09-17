@@ -222,3 +222,94 @@ test("listOrdersByUser leaves an order with no matching lines with an empty item
   const orders = await listOrdersByUser("user-1");
   assert.deepEqual(orders[0].items, []);
 });
+
+test("listAllOrders returns an empty array without querying items when there are no orders", async (t) => {
+  const dbMock = createSequentialDbMock([]);
+  const { listAllOrders } = await loadOrderRepository(t, dbMock);
+
+  assert.deepEqual(await listAllOrders(), []);
+});
+
+test("listAllOrders groups line items under their matching order", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [
+      {
+        order: { id: "order-1" },
+        firstName: "Ada",
+        lastName: "Lovelace",
+        email: "ada@example.com",
+      },
+      {
+        order: { id: "order-2" },
+        firstName: "Alan",
+        lastName: "Turing",
+        email: "alan@example.com",
+      },
+    ],
+    [
+      { orderId: "order-1", productName: "Mouse" },
+      { orderId: "order-1", productName: "Pad" },
+      { orderId: "order-2", productName: "Keyboard" },
+    ],
+  );
+  const { listAllOrders } = await loadOrderRepository(t, dbMock);
+
+  const orders = await listAllOrders();
+  assert.equal(orders[0].items.length, 2);
+  assert.equal(orders[1].items.length, 1);
+});
+
+test("listAllOrders composes the customer name from first and last name", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [
+      {
+        order: { id: "order-1" },
+        firstName: "Ada",
+        lastName: "Lovelace",
+        email: "ada@example.com",
+      },
+    ],
+    [],
+  );
+  const { listAllOrders } = await loadOrderRepository(t, dbMock);
+
+  const orders = await listAllOrders();
+  assert.equal(orders[0].customerName, "Ada Lovelace");
+  assert.equal(orders[0].customerEmail, "ada@example.com");
+});
+
+test("listAllOrders skips the missing half of the name", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [
+      {
+        order: { id: "order-1" },
+        firstName: "Ada",
+        lastName: null,
+        email: "ada@example.com",
+      },
+    ],
+    [],
+  );
+  const { listAllOrders } = await loadOrderRepository(t, dbMock);
+
+  const orders = await listAllOrders();
+  assert.equal(orders[0].customerName, "Ada");
+});
+
+test("listAllOrders falls back to the email when the customer has no name", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [
+      {
+        order: { id: "order-1" },
+        firstName: null,
+        lastName: null,
+        email: "ada@example.com",
+      },
+    ],
+    [],
+  );
+  const { listAllOrders } = await loadOrderRepository(t, dbMock);
+
+  const orders = await listAllOrders();
+  assert.equal(orders[0].customerName, "ada@example.com");
+});

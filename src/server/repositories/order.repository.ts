@@ -4,6 +4,7 @@ import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 
 import { ConflictError, NotFoundError } from "@/lib/api-errors";
 import type {
+  AdminOrderListItem,
   OrderItem,
   OrderWithItems,
 } from "@/modules/orders/types/order.types";
@@ -11,6 +12,7 @@ import { db } from "@/server/db";
 import { orderItems } from "@/server/db/schema/order-item";
 import { orders } from "@/server/db/schema/order";
 import { products } from "@/server/db/schema/product";
+import { users } from "@/server/db/schema/user";
 
 export type PendingOrderLineInput = {
   productId: string;
@@ -308,5 +310,76 @@ export async function listOrdersByUser(
   return rows.map((order) => ({
     ...order,
     items: linesByOrder.get(order.id) ?? [],
+  }));
+}
+
+/**
+ * Ambos nombres son nullable en `users`: un comprador sincronizado desde Clerk
+ * sin nombre se identifica por su email antes que por una cadena vacía.
+ */
+function composeCustomerName(customer: {
+  firstName: string | null;
+  lastName: string | null;
+  email: string;
+}): string {
+  return (
+    [customer.firstName, customer.lastName].filter(Boolean).join(" ") ||
+    customer.email
+  );
+}
+
+/**
+ * Todas las órdenes del sistema para el panel. Sin filtros ni `limit`: la vista
+ * de administración filtra y pagina en cliente (spec 018), así que la consulta
+ * no recibe entrada alguna.
+ *
+ * `innerJoin` y no `leftJoin`: `orders.user_id` es NOT NULL con FK, no existen
+ * órdenes huérfanas que un LEFT pudiera rescatar.
+ */
+export async function listAllOrders(): Promise<AdminOrderListItem[]> {
+  const rows = await db
+    .select({
+      order: orders,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+    })
+    .from(orders)
+    .innerJoin(users, eq(orders.userId, users.id))
+    .orderBy(desc(orders.createdAt));
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  // Una sola consulta para todas las líneas: un SELECT por orden sería N+1.
+  const lines = await db
+    .select()
+    .from(orderItems)
+    .where(
+      inArray(
+        orderItems.orderId,
+        rows.map((row) => row.order.id),
+      ),
+    )
+    .orderBy(asc(orderItems.productName));
+
+  const linesByOrder = new Map<string, OrderItem[]>();
+
+  for (const line of lines) {
+    const bucket = linesByOrder.get(line.orderId);
+
+    if (bucket) {
+      bucket.push(line);
+    } else {
+      linesByOrder.set(line.orderId, [line]);
+    }
+  }
+
+  return rows.map((row) => ({
+    ...row.order,
+    items: linesByOrder.get(row.order.id) ?? [],
+    customerName: composeCustomerName(row),
+    customerEmail: row.email,
   }));
 }

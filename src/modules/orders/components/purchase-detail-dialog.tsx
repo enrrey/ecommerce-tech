@@ -79,7 +79,20 @@ function ReceiptAction({ order }: { order: OrderWithItems }) {
   );
 }
 
-function PurchaseDetail({ order }: { order: OrderWithItems }) {
+/**
+ * Quién compró. Solo lo pinta el panel: en `/profile` el comprador es quien
+ * mira, así que las props llegan ausentes y el dialog queda idéntico.
+ */
+type CustomerProps = {
+  customerName?: string;
+  customerEmail?: string;
+};
+
+function PurchaseDetail({
+  order,
+  customerName,
+  customerEmail,
+}: { order: OrderWithItems } & CustomerProps) {
   const presentation = orderStatusPresentation(order.status);
 
   return (
@@ -101,6 +114,25 @@ function PurchaseDetail({ order }: { order: OrderWithItems }) {
           </span>
           <Badge variant={presentation.variant}>{presentation.label}</Badge>
         </div>
+
+        {customerName || customerEmail ? (
+          <>
+            <Separator />
+            <div className="flex items-start justify-between gap-3">
+              <span className="text-muted-foreground text-sm font-semibold">
+                Comprador
+              </span>
+              <div className="flex min-w-0 flex-col items-end">
+                <span className="truncate text-sm font-bold">
+                  {customerName}
+                </span>
+                <span className="text-muted-foreground truncate text-xs">
+                  {customerEmail}
+                </span>
+              </div>
+            </div>
+          </>
+        ) : null}
 
         <Separator />
 
@@ -150,17 +182,25 @@ function PurchaseDetail({ order }: { order: OrderWithItems }) {
  */
 export function PurchaseDetailDialog({
   order,
+  customerName,
+  customerEmail,
   onClose,
 }: {
   order: OrderWithItems | null;
   onClose: () => void;
-}) {
+} & CustomerProps) {
   return (
     <Dialog open={order !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         {/* Montado solo con el dialog abierto: al cerrarse desmonta el hook de
             la boleta y la siguiente compra arranca su propia consulta. */}
-        {order ? <PurchaseDetail order={order} /> : null}
+        {order ? (
+          <PurchaseDetail
+            order={order}
+            customerName={customerName}
+            customerEmail={customerEmail}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   );

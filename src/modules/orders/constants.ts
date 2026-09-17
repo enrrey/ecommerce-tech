@@ -3,6 +3,7 @@ import { CheckCircle2Icon, ClockIcon } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import type { Badge } from "@/components/ui/badge";
+import { ALL_FILTER } from "@/modules/products/constants";
 
 import type { MyOrdersQueryInput } from "./schemas/order-history.schema";
 
@@ -11,6 +12,15 @@ export const orderKeys = {
   mine: (query: MyOrdersQueryInput) =>
     [...orderKeys.all, "mine", query] as const,
   receipt: (id: string) => [...orderKeys.all, "receipt", id] as const,
+};
+
+/**
+ * Clave propia y no una rama de `orderKeys`: el listado del panel y el
+ * historial del cliente son datos distintos y no deben invalidarse juntos.
+ */
+export const adminOrderKeys = {
+  all: ["admin-orders"] as const,
+  list: () => [...adminOrderKeys.all, "list"] as const,
 };
 
 export const paymentMethodKeys = {
@@ -77,6 +87,18 @@ export const ORDER_STATUS_PRESENTATION: Record<
   },
   canceled: { label: "Cancelado", variant: "destructive" },
 };
+
+/**
+ * Opciones del Select de estado del panel, derivadas de la presentación: añadir
+ * un estado con copy lo pone en el filtro sin tocar esta lista.
+ */
+export const ORDER_STATUS_FILTERS: { value: string; label: string }[] = [
+  { value: ALL_FILTER, label: "Todos" },
+  ...Object.entries(ORDER_STATUS_PRESENTATION).map(([value, { label }]) => ({
+    value,
+    label,
+  })),
+];
 
 /**
  * `orders.status` es varchar, no enum: un estado futuro que aún no tenga copy se
