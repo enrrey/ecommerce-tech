@@ -1,7 +1,14 @@
+import { can } from "@/lib/permissions";
 import { AdminOrdersView } from "@/modules/orders/components/admin-orders-view";
 
-// Server Component: solo compone. La frontera de cliente entra en AdminOrdersView.
-export default function AdminOrdersPage() {
+// Server Component: solo compone y resuelve qué acciones puede ofrecer la vista.
+// La autorización real la impone el Route Handler con `requirePermission`.
+export default async function AdminOrdersPage() {
+  const [canUpdateStatus, canCancel] = await Promise.all([
+    can("orders.update_status"),
+    can("orders.cancel"),
+  ]);
+
   return (
     <section className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
@@ -12,7 +19,10 @@ export default function AdminOrdersPage() {
         </p>
       </header>
 
-      <AdminOrdersView />
+      <AdminOrdersView
+        canUpdateStatus={canUpdateStatus}
+        canCancel={canCancel}
+      />
     </section>
   );
 }

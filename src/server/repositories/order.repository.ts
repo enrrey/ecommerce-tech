@@ -3,16 +3,28 @@ import "server-only";
 import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 
 import { ConflictError, NotFoundError } from "@/lib/api-errors";
+import type { AuditSeverity } from "@/modules/audit/types/audit-log.types";
+import {
+  canTransition,
+  ORDER_STATUSES,
+  type OrderStatusTarget,
+} from "@/modules/orders/lib/order-status-transitions";
 import type {
   AdminOrderListItem,
+  Order,
   OrderItem,
   OrderWithItems,
 } from "@/modules/orders/types/order.types";
-import { db } from "@/server/db";
+import { insertAuditLog } from "@/server/repositories/audit-log.repository";
+import { db, type Database } from "@/server/db";
 import { orderItems } from "@/server/db/schema/order-item";
 import { orders } from "@/server/db/schema/order";
 import { products } from "@/server/db/schema/product";
 import { users } from "@/server/db/schema/user";
+
+// El cliente transaccional se deriva de la firma de `db.transaction` para no
+// depender de tipos internos de Drizzle ni recurrir a `any`.
+type DbClient = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 export type PendingOrderLineInput = {
   productId: string;
@@ -140,6 +152,42 @@ export async function attachCheckoutSessionToOrder(
 }
 
 /**
+ * Descuenta del catálogo lo comprado en la orden. Recibe el cliente
+ * transaccional porque solo tiene sentido dentro de la transacción que marca la
+ * orden como pagada: una orden `paid` con el inventario intacto sería
+ * sobreventa.
+ */
+async function decrementStockForOrder(
+  tx: DbClient,
+  orderId: string,
+): Promise<void> {
+  const lines = await tx
+    .select({
+      productId: orderItems.productId,
+      quantity: orderItems.quantity,
+    })
+    .from(orderItems)
+    .where(eq(orderItems.orderId, orderId));
+
+  // Un UPDATE por línea: los carritos son de pocas líneas y todo ocurre
+  // dentro de la transacción, así que un CTE no compraría nada.
+  for (const line of lines) {
+    // `product_id` es nullable (FK `set null`): la línea histórica sobrevive
+    // al producto borrado del catálogo, pero ya no hay stock que descontar.
+    if (!line.productId) {
+      continue;
+    }
+
+    await tx
+      .update(products)
+      // Resta en SQL, no `stock - quantity` calculado en JS: el valor leído
+      // podría estar obsoleto frente a otra compra concurrente.
+      .set({ stock: sql`${products.stock} - ${line.quantity}` })
+      .where(eq(products.id, line.productId));
+  }
+}
+
+/**
  * Confirma el pago de la orden y descuenta el stock comprado, todo en una sola
  * transacción: una orden `paid` con el inventario intacto sería sobreventa.
  *
@@ -178,32 +226,118 @@ export async function markOrderAsPaid(
       return false;
     }
 
-    const lines = await tx
-      .select({
-        productId: orderItems.productId,
-        quantity: orderItems.quantity,
-      })
-      .from(orderItems)
-      .where(eq(orderItems.orderId, order.id));
-
-    // Un UPDATE por línea: los carritos son de pocas líneas y todo ocurre
-    // dentro de la transacción, así que un CTE no compraría nada.
-    for (const line of lines) {
-      // `product_id` es nullable (FK `set null`): la línea histórica sobrevive
-      // al producto borrado del catálogo, pero ya no hay stock que descontar.
-      if (!line.productId) {
-        continue;
-      }
-
-      await tx
-        .update(products)
-        // Resta en SQL, no `stock - quantity` calculado en JS: el valor leído
-        // podría estar obsoleto frente a otra compra concurrente.
-        .set({ stock: sql`${products.stock} - ${line.quantity}` })
-        .where(eq(products.id, line.productId));
-    }
+    await decrementStockForOrder(tx, order.id);
 
     return true;
+  });
+}
+
+export type UpdateOrderStatusInput = {
+  orderId: string;
+  nextStatus: OrderStatusTarget;
+  /** `users.id` del actor devuelto por `requirePermission`. */
+  actorId: string;
+};
+
+// La acción y la severidad salen del destino: cancelar es un evento de negocio
+// que alguien querrá reconstruir, confirmar el pago es rutina.
+const STATUS_AUDIT: Record<
+  OrderStatusTarget,
+  { action: string; severity: AuditSeverity }
+> = {
+  paid: { action: "order.status_changed", severity: "info" },
+  canceled: { action: "order.canceled", severity: "warning" },
+};
+
+const AUDIT_ENTITY_TYPE = "order";
+
+const CONCURRENT_CHANGE_MESSAGE =
+  "El estado de la orden cambió mientras se procesaba la solicitud";
+
+function invalidTransitionMessage(from: string, to: string): string {
+  return `No se puede pasar una orden en estado "${from}" a "${to}"`;
+}
+
+/**
+ * Cambia el estado de una orden desde el panel y deja su rastro en la bitácora,
+ * ambas cosas en la misma transacción (SETUP 5.2 regla 2): si el log falla, el
+ * estado no queda cambiado a espaldas de la auditoría.
+ *
+ * La fila se bloquea con `FOR UPDATE` antes de decidir: es lo que hace que el
+ * `before` del log sea el estado real y no una lectura que otra petición ya
+ * pisó. El `AND status IN (...)` del UPDATE se mantiene como guardia del lado
+ * de SQL, con los orígenes válidos derivados de la misma máquina que usa la UI.
+ *
+ * `pending → paid` descuenta stock porque es lo que hace el webhook de Stripe en
+ * esa misma transición; omitirlo dejaría el inventario mintiendo. Cancelar no
+ * repone stock: esa deuda la salda el spec 019.
+ */
+export async function updateOrderStatus(
+  input: UpdateOrderStatusInput,
+): Promise<Order> {
+  const allowedOrigins = ORDER_STATUSES.filter((from) =>
+    canTransition(from, input.nextStatus),
+  );
+
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({ status: orders.status })
+      .from(orders)
+      .where(eq(orders.id, input.orderId))
+      .limit(1)
+      .for("update");
+
+    if (!current) {
+      throw new NotFoundError("La orden no existe");
+    }
+
+    // 409 antes de tocar nada: una transición prohibida no cambia la fila ni
+    // escribe en la bitácora (AC3).
+    if (!canTransition(current.status, input.nextStatus)) {
+      throw new ConflictError(
+        invalidTransitionMessage(current.status, input.nextStatus),
+      );
+    }
+
+    const [updated] = await tx
+      .update(orders)
+      .set({ status: input.nextStatus })
+      .where(
+        and(
+          eq(orders.id, input.orderId),
+          inArray(orders.status, allowedOrigins),
+        ),
+      )
+      .returning();
+
+    if (!updated) {
+      throw new ConflictError(CONCURRENT_CHANGE_MESSAGE);
+    }
+
+    if (input.nextStatus === "paid") {
+      await decrementStockForOrder(tx, updated.id);
+    }
+
+    const audit = STATUS_AUDIT[input.nextStatus];
+
+    await insertAuditLog(
+      {
+        actorId: input.actorId,
+        action: audit.action,
+        entityType: AUDIT_ENTITY_TYPE,
+        entityId: updated.id,
+        // Solo el estado: ni comprador, ni total, ni datos de pago
+        // (SETUP 5.2 regla 3).
+        changes: {
+          before: { status: current.status },
+          after: { status: updated.status },
+        },
+        severity: audit.severity,
+      },
+      tx,
+    );
+
+    return updated;
   });
 }
 

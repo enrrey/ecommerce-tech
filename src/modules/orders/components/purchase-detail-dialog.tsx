@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { ExternalLinkIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -88,11 +89,18 @@ type CustomerProps = {
   customerEmail?: string;
 };
 
+/**
+ * Acciones extra del pie. El dialog no sabe cuáles son ni qué permisos exigen:
+ * el panel las inyecta y `/profile` las omite, quedando idéntico.
+ */
+type ActionsProp = { actions?: ReactNode };
+
 function PurchaseDetail({
   order,
   customerName,
   customerEmail,
-}: { order: OrderWithItems } & CustomerProps) {
+  actions,
+}: { order: OrderWithItems } & CustomerProps & ActionsProp) {
   const presentation = orderStatusPresentation(order.status);
 
   return (
@@ -171,6 +179,7 @@ function PurchaseDetail({
 
       <DialogFooter>
         <ReceiptAction order={order} />
+        {actions}
       </DialogFooter>
     </>
   );
@@ -184,11 +193,13 @@ export function PurchaseDetailDialog({
   order,
   customerName,
   customerEmail,
+  actions,
   onClose,
 }: {
   order: OrderWithItems | null;
   onClose: () => void;
-} & CustomerProps) {
+} & CustomerProps &
+  ActionsProp) {
   return (
     <Dialog open={order !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
@@ -199,6 +210,7 @@ export function PurchaseDetailDialog({
             order={order}
             customerName={customerName}
             customerEmail={customerEmail}
+            actions={actions}
           />
         ) : null}
       </DialogContent>

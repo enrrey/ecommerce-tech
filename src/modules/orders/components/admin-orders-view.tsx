@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
 import { useAdminOrders } from "../hooks/use-admin-orders";
-import type { AdminOrderListItem } from "../types/order.types";
+import { AdminOrderActions } from "./admin-order-actions";
 import { AdminOrdersTable } from "./admin-orders-table";
 import { PurchaseDetailDialog } from "./purchase-detail-dialog";
 
@@ -21,12 +21,22 @@ function TableSkeleton() {
   );
 }
 
+type AdminOrdersViewProps = {
+  canUpdateStatus: boolean;
+  canCancel: boolean;
+};
+
 /**
  * Contenedor del listado del panel: el único que consulta. La tabla y el dialog
  * son presentacionales y reciben lo que necesitan por props.
  */
-export function AdminOrdersView() {
-  const [selected, setSelected] = useState<AdminOrderListItem | null>(null);
+export function AdminOrdersView({
+  canUpdateStatus,
+  canCancel,
+}: AdminOrdersViewProps) {
+  // Se guarda el id y no la fila: tras cambiar el estado, el detalle abierto
+  // sale del listado ya refrescado en vez de quedarse mostrando una copia vieja.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const ordersQuery = useAdminOrders();
 
@@ -51,6 +61,9 @@ export function AdminOrdersView() {
     );
   }
 
+  const selected =
+    ordersQuery.data.find((order) => order.id === selectedId) ?? null;
+
   return (
     <div className="flex flex-col gap-6">
       {ordersQuery.data.length === 0 ? (
@@ -62,14 +75,27 @@ export function AdminOrdersView() {
           </p>
         </div>
       ) : (
-        <AdminOrdersTable orders={ordersQuery.data} onSelect={setSelected} />
+        <AdminOrdersTable
+          orders={ordersQuery.data}
+          onSelect={(order) => setSelectedId(order.id)}
+        />
       )}
 
       <PurchaseDetailDialog
         order={selected}
         customerName={selected?.customerName}
         customerEmail={selected?.customerEmail}
-        onClose={() => setSelected(null)}
+        actions={
+          selected ? (
+            <AdminOrderActions
+              orderId={selected.id}
+              status={selected.status}
+              canUpdateStatus={canUpdateStatus}
+              canCancel={canCancel}
+            />
+          ) : null
+        }
+        onClose={() => setSelectedId(null)}
       />
     </div>
   );
