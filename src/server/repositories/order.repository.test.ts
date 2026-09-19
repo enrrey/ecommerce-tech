@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ConflictError, NotFoundError } from "@/lib/api-errors";
-import { createSequentialDbMock } from "@/test-utils/mocks/drizzle";
+import {
+  createSequentialDbMock,
+  type SequentialDbMock,
+} from "@/test-utils/mocks/drizzle";
 import { mergeLines, startOfNextDay } from "./order.repository.ts";
 
 test("mergeLines keeps a single line per distinct product", () => {
@@ -166,6 +169,219 @@ test("markOrderAsPaid skips lines whose product was deleted from the catalog", a
   const { markOrderAsPaid } = await loadOrderRepository(t, dbMock);
 
   assert.equal(await markOrderAsPaid("cs_test_1", "pi_test_1"), true);
+});
+
+// --- updateOrderStatus (spec 020) ---------------------------------------
+// Orden de llamadas al mock: SELECT ... FOR UPDATE → UPDATE orders →
+// [SELECT líneas + UPDATE products si el destino es `paid`] → INSERT audit_logs.
+
+type AuditLogValues = {
+  actorId: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  changes: { before: { status: string }; after: { status: string } };
+  severity: string;
+};
+
+/** Lo que se pasó a `.values()`: el único INSERT de estas transiciones es el log. */
+function auditLogInput(dbMock: SequentialDbMock): AuditLogValues {
+  const call = dbMock.calls.find((recorded) => recorded.method === "values");
+
+  assert.ok(call, "se esperaba un INSERT con .values() para el audit log");
+
+  return call.args[0] as AuditLogValues;
+}
+
+function countCalls(dbMock: SequentialDbMock, method: string): number {
+  return dbMock.calls.filter((recorded) => recorded.method === method).length;
+}
+
+const actorId = "actor-1";
+
+test("updateOrderStatus throws NotFoundError when the order does not exist", async (t) => {
+  const dbMock = createSequentialDbMock([]);
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await assert.rejects(
+    () =>
+      updateOrderStatus({ orderId: "missing", nextStatus: "paid", actorId }),
+    NotFoundError,
+  );
+});
+
+test("updateOrderStatus throws ConflictError on a forbidden transition without touching the row or the log", async (t) => {
+  // Solo el SELECT tiene resultado en cola: cualquier escritura posterior
+  // fallaría por cola vacía antes de llegar al assert de abajo (AC3).
+  const dbMock = createSequentialDbMock([{ status: "canceled" }]);
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await assert.rejects(
+    () =>
+      updateOrderStatus({ orderId: "order-1", nextStatus: "paid", actorId }),
+    ConflictError,
+  );
+
+  assert.equal(countCalls(dbMock, "update"), 0);
+  assert.equal(countCalls(dbMock, "insert"), 0);
+});
+
+test("updateOrderStatus refuses to re-apply the status the order already has", async (t) => {
+  const dbMock = createSequentialDbMock([{ status: "canceled" }]);
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await assert.rejects(
+    () =>
+      updateOrderStatus({
+        orderId: "order-1",
+        nextStatus: "canceled",
+        actorId,
+      }),
+    ConflictError,
+  );
+
+  assert.equal(countCalls(dbMock, "update"), 0);
+});
+
+test("updateOrderStatus throws ConflictError when the row changed between the SELECT and the UPDATE", async (t) => {
+  const dbMock = createSequentialDbMock([{ status: "pending" }], []);
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await assert.rejects(
+    () =>
+      updateOrderStatus({ orderId: "order-1", nextStatus: "paid", actorId }),
+    ConflictError,
+  );
+
+  assert.equal(countCalls(dbMock, "insert"), 0);
+});
+
+test("updateOrderStatus marks a pending order as paid and decrements the stock of its lines", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "pending" }],
+    [{ id: "order-1", status: "paid" }],
+    [
+      { productId: "p1", quantity: 2 },
+      { productId: "p2", quantity: 1 },
+    ],
+    [],
+    [],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  const order = await updateOrderStatus({
+    orderId: "order-1",
+    nextStatus: "paid",
+    actorId,
+  });
+
+  assert.equal(order.status, "paid");
+  // UPDATE de la orden + un UPDATE de stock por línea.
+  assert.equal(countCalls(dbMock, "update"), 3);
+});
+
+test("updateOrderStatus audits pending → paid as order.status_changed", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "pending" }],
+    [{ id: "order-1", status: "paid" }],
+    [],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await updateOrderStatus({ orderId: "order-1", nextStatus: "paid", actorId });
+
+  const log = auditLogInput(dbMock);
+  assert.equal(log.action, "order.status_changed");
+  assert.equal(log.severity, "info");
+  assert.equal(log.actorId, actorId);
+  assert.equal(log.entityType, "order");
+  assert.equal(log.entityId, "order-1");
+});
+
+test("updateOrderStatus cancels a pending order without restocking anything", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "pending" }],
+    [{ id: "order-1", status: "canceled" }],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  const order = await updateOrderStatus({
+    orderId: "order-1",
+    nextStatus: "canceled",
+    actorId,
+  });
+
+  assert.equal(order.status, "canceled");
+  // Solo el UPDATE de la orden: cancelar no toca `products` (deuda del spec 019).
+  assert.equal(countCalls(dbMock, "update"), 1);
+});
+
+test("updateOrderStatus cancels a paid order and audits it as order.canceled", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "paid" }],
+    [{ id: "order-1", status: "canceled" }],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await updateOrderStatus({
+    orderId: "order-1",
+    nextStatus: "canceled",
+    actorId,
+  });
+
+  const log = auditLogInput(dbMock);
+  assert.equal(log.action, "order.canceled");
+  assert.equal(log.severity, "warning");
+  assert.equal(countCalls(dbMock, "update"), 1);
+});
+
+test("updateOrderStatus writes exactly one audit row per transition", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "pending" }],
+    [{ id: "order-1", status: "canceled" }],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await updateOrderStatus({
+    orderId: "order-1",
+    nextStatus: "canceled",
+    actorId,
+  });
+
+  assert.equal(countCalls(dbMock, "insert"), 1);
+});
+
+test("updateOrderStatus logs only the status in changes, with no customer or payment data", async (t) => {
+  const dbMock = createSequentialDbMock(
+    [{ status: "pending" }],
+    [
+      {
+        id: "order-1",
+        status: "canceled",
+        userId: "user-1",
+        totalCents: 3000,
+        stripePaymentIntentId: "pi_test_1",
+      },
+    ],
+    [{ id: "log-1" }],
+  );
+  const { updateOrderStatus } = await loadOrderRepository(t, dbMock);
+
+  await updateOrderStatus({
+    orderId: "order-1",
+    nextStatus: "canceled",
+    actorId,
+  });
+
+  assert.deepEqual(auditLogInput(dbMock).changes, {
+    before: { status: "pending" },
+    after: { status: "canceled" },
+  });
 });
 
 test("findOrderById returns null when the order does not exist", async (t) => {

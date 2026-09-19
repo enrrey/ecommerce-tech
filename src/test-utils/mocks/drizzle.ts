@@ -27,6 +27,9 @@ function chainable<T>(rows: T, calls: RecordedCall[]) {
     "orderBy",
     "limit",
     "offset",
+    // `.for("update")`: el bloqueo de fila no cambia el resultado del fake, pero
+    // el encadenamiento tiene que seguir existiendo.
+    "for",
     "groupBy",
     "values",
     "set",
